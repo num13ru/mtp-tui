@@ -1,0 +1,55 @@
+[workspace]
+members = [".", "benchmarks/mtp-rs-vs-libmtp"]
+
+[package]
+name = "mtp-rs"
+version = "0.4.1"
+edition = "2021"
+rust-version = "1.79"
+license = "MIT OR Apache-2.0"
+description = "Pure-Rust MTP (Media Transfer Protocol) library for modern Android devices"
+repository = "https://github.com/vdavid/mtp-rs"
+keywords = ["mtp", "android", "usb", "media", "transfer"]
+categories = ["hardware-support", "filesystem"]
+readme = "README.md"
+documentation = "https://docs.rs/mtp-rs"
+exclude = [
+    ".github/",
+    "AGENTS.md",
+    "docs/",
+    "justfile",
+    "deny.toml",
+    "clippy.toml",
+    "rustfmt.toml",
+    "proptest-regressions/",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+# USB transport (Phase 3+)
+nusb = "0.2"
+
+# Async runtime agnostic
+futures = "0.3"
+futures-timer = "3.0"
+async-trait = "0.1"
+
+# Byte handling
+bytes = "1.5"
+
+# For thiserror derive
+thiserror = "1.0"
+
+# Enum conversion derives
+num_enum = "0.7"
+
+[dev-dependencies]
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "time", "fs", "io-util"] }
+proptest = "=1.5.0"  # Pinned for MSRV 1.79 compatibility
+serial_test = "3.1"
+parking_lot = "0.12"  # Used by MockTransport
+
+[features]
+default = []
