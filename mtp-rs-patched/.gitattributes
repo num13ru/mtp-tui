@@ -1,3 +1,0 @@
-# Ensure consistent LF line endings across all platforms.
-# This prevents cargo fmt failures on Windows where Git defaults to CRLF.
-* text=auto eol=lf
