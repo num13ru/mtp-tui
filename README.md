@@ -1,4 +1,6 @@
 # mac-mtp-tui
+![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
+[![Rust](https://github.com/num13ru/mac-mtp-tui/actions/workflows/rust.yml/badge.svg)](https://github.com/num13ru/mac-mtp-tui/actions/workflows/rust.yml)
 
 A terminal file manager for MTP devices (Android phones, Kindle, etc.) on macOS.
 
