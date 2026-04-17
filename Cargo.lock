@@ -820,9 +820,9 @@ dependencies = [
 
 [[package]]
 name = "mtp-rs"
-version = "0.4.2"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a82471f510d60813e8ed9b5af9a8280b217e33dffa8676cd26d38f7ad106bf"
+checksum = "540a96bac90ebd4f93b82afc4d7a6ba5df2f6775e68152e9b11bb3cc578abce6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -830,7 +830,7 @@ dependencies = [
  "futures-timer",
  "num_enum",
  "nusb",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
