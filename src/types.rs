@@ -17,6 +17,10 @@ pub enum ConfirmAction {
         source: PathBuf,
         delete_id: String,
     },
+    OverwritePull {
+        entry_id: String,
+        filename: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

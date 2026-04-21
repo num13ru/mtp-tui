@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use std::path::Path;
 
@@ -25,7 +25,7 @@ pub trait DeviceBackend: Send {
     fn enter_dir(&mut self, entry_id: &str, name: &str) -> Result<()>;
     fn go_up(&mut self) -> Result<()>;
     fn refresh(&mut self) -> Result<()>;
-    fn pull_file(&mut self, _entry_id: &str, _target_dir: &Path) -> Result<()> {
+    fn pull_file(&mut self, _entry_id: &str, _filename: &str, _target_dir: &Path) -> Result<()> {
         anyhow::bail!("pull_file is not implemented yet")
     }
     fn push_file(&mut self, _source: &Path) -> Result<()> {
@@ -223,6 +223,36 @@ impl DeviceBackend for MtpBackend {
                 |_progress| ControlFlow::Continue(()),
             ))
             .with_context(|| format!("failed to upload {filename}"))?;
+
+        Ok(())
+    }
+
+    fn pull_file(&mut self, entry_id: &str, filename: &str, target_dir: &Path) -> Result<()> {
+        let handle_raw: u32 = entry_id
+            .parse()
+            .with_context(|| format!("invalid object handle: {entry_id}"))?;
+        let handle = ObjectHandle(handle_raw);
+        let target_path = target_dir.join(filename);
+
+        let mut download = self
+            .rt
+            .block_on(self.storage.download_stream(handle))
+            .with_context(|| format!("failed to start download of {filename}"))?;
+
+        let file = fs::File::create(&target_path)
+            .with_context(|| format!("failed to create: {}", target_path.display()))?;
+        let mut writer = std::io::BufWriter::new(file);
+
+        while let Some(result) = self.rt.block_on(download.next_chunk()) {
+            let chunk = result.with_context(|| format!("error downloading {filename}"))?;
+            writer
+                .write_all(&chunk)
+                .with_context(|| format!("failed to write to {}", target_path.display()))?;
+        }
+
+        writer
+            .flush()
+            .with_context(|| format!("failed to flush {}", target_path.display()))?;
 
         Ok(())
     }

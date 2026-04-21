@@ -54,7 +54,10 @@ Early stage. Working:
 - Async directory loading with spinner (UI never freezes)
 - Streaming progress counter ("Loading 42/500...")
 
-Not yet implemented: file push/pull, mkdir, delete, rename.
+- Push file to device (`p`) with overwrite confirmation
+- Pull file from device (`g`) with overwrite confirmation
+
+Not yet implemented: mkdir, delete, rename.
 
 See [ROADMAP.md](ROADMAP.md) for planned improvements.
 

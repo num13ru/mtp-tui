@@ -61,10 +61,13 @@ directory, a modal confirmation dialog asks whether to overwrite (delete-then-
 upload, since MTP has no in-place overwrite). The device listing refreshes
 automatically after a successful push.
 
-### Pull file (device to host)
+### Pull file (device to host) **(done)**
 
-Implement `pull_file` using `Storage::download_stream()` for large-file
-support. Stream to disk instead of buffering in memory.
+Uses `Storage::download_stream()` to stream device files to disk in chunks
+via `FileDownload::next_chunk()`, avoiding full in-memory buffering. If a file
+with the same name already exists on the host, a modal confirmation dialog asks
+whether to overwrite. The host listing refreshes automatically after a
+successful pull.
 
 ### Create directory
 

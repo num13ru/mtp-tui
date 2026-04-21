@@ -200,6 +200,11 @@ impl App {
                                 self.status = format!("Error: {e:#}");
                             }
                         }
+                        ConfirmAction::OverwritePull { entry_id, filename } => {
+                            if let Err(e) = self.do_pull_file(&entry_id, &filename) {
+                                self.status = format!("Error: {e:#}");
+                            }
+                        }
                     }
                 }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -407,10 +412,10 @@ impl App {
     }
 
     fn copy_device_to_host(&mut self) -> Result<()> {
-        let Some(backend) = &mut self.backend else {
+        if self.backend.is_none() {
             self.status = "No device connected".into();
             return Ok(());
-        };
+        }
         let Some(entry) = self.device.selected() else {
             return Ok(());
         };
@@ -418,8 +423,29 @@ impl App {
             self.status = "Skipping directory pull for now".into();
             return Ok(());
         }
-        backend.pull_file(&entry.id, &self.host_cwd)?;
-        self.status = format!("Pulled {}", entry.name);
+
+        let entry_id = entry.id.clone();
+        let filename = entry.name.clone();
+
+        if self.host_cwd.join(&filename).exists() {
+            self.confirm_dialog = Some(ConfirmDialog {
+                title: "Overwrite?".into(),
+                message: format!("\"{filename}\" already exists on host. Overwrite?"),
+                on_confirm: ConfirmAction::OverwritePull { entry_id, filename },
+            });
+            return Ok(());
+        }
+
+        self.do_pull_file(&entry_id, &filename)
+    }
+
+    fn do_pull_file(&mut self, entry_id: &str, filename: &str) -> Result<()> {
+        let backend = self.backend.as_mut().context("no device connected")?;
+
+        self.status = format!("Pulling {filename}...");
+        backend.pull_file(entry_id, filename, &self.host_cwd)?;
+        self.status = format!("Pulled {filename}");
+        self.host.entries = Self::read_host_dir(&self.host_cwd)?;
         Ok(())
     }
 
