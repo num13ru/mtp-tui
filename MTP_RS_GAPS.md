@@ -74,6 +74,90 @@ Lower priority but significant performance win for inspector-style features.
 `SelfTest`, `SetObjectPropList`, `SendObjectPropList`, `GetObjectReferences`,
 `SetObjectReferences`, WMDRMPD -- niche use cases, unlikely to be needed soon.
 
+## Root Listing Performance (`list_objects_stream` quirk) -- **CRITICAL**
+
+### Problem
+
+When listing root (`parent=None`), `GetObjectHandles(parent=0)` on the Kindle
+Paperwhite returns **all 2541 objects** on the storage — not just the ~20 root-level
+items. mtp-rs then calls `GetObjectInfo` for each handle (one USB round-trip each)
+and filters by `ParentFilter::Exact(ROOT)`, discarding ~2520 results.
+
+The Android workaround (`parent=0xFFFFFFFF` instead of `0`) is gated behind
+`is_android()`, which checks for `"android.com"` in `vendor_extension_desc`.
+The Kindle (`"microsoft.com/WMDRMPD:10.1"`) doesn't match, so it takes the slow
+path. The comment in the code already acknowledges this class of bug:
+
+```
+// Filter by exact parent (catches Fuji devices that return all objects for root)
+```
+
+…but the filter is applied *after* fetching `GetObjectInfo` for every handle.
+
+### Current code (`Storage::list_objects_stream`)
+
+```rust
+let effective_parent = if parent.is_none() && self.inner.is_android() {
+    Some(ObjectHandle::ALL)   // 0xFFFFFFFF — works, root-only
+} else {
+    parent                    // None → 0x00000000 — returns ALL objects on Kindle
+};
+```
+
+### Diagnostic results
+
+Tested on the Kindle Paperwhite with `examples/root_handle_test.rs`
+(full output in `log/root_handle_test.log`):
+
+| Call | Handles returned |
+|------|-----------------|
+| `GetObjectHandles(parent=0x00000000)` | **2541** (entire storage, flat dump) |
+| `GetObjectHandles(parent=0xFFFFFFFF)` | **23** (root-level items only) |
+
+All 23 handles from the `0xFFFFFFFF` call have `parent=0x00000000`, confirming they
+are genuine root objects. The Kindle behaves identically to Android here — the
+`is_android()` gate is the only thing preventing the fast path.
+
+This is a **110x reduction** in `GetObjectInfo` round-trips (2541 → 23).
+
+### Confirmed fix
+
+Try `0xFFFFFFFF` first for all root listings, fall back to `0` + `ParentFilter`.
+Remove the `is_android()` gate:
+
+```rust
+if parent.is_none() {
+    let alt_result = self.inner.session
+        .get_object_handles(self.id, None, Some(ObjectHandle::ALL))
+        .await;
+    match alt_result {
+        Ok(handles) if !handles.is_empty() => {
+            return Ok(ObjectListing {
+                inner: Arc::clone(&self.inner),
+                handles,
+                cursor: 0,
+                parent_filter: None, // device already filtered
+            });
+        }
+        _ => {} // fall through to parent=0 path
+    }
+}
+```
+
+This covers Android, Kindle, Fuji, and any future device with the same quirk
+without vendor-specific detection. One extra round-trip in the worst case (device
+errors on `0xFFFFFFFF` → falls through to existing path).
+
+### Kindle-specific evidence
+
+| Fact | Value |
+|------|-------|
+| Vendor extension | `microsoft.com/WMDRMPD:10.1;microsoft.com/playready:1.10` |
+| `is_android()` | `false` (no `"android.com"` in extension) |
+| `GetObjectHandles(parent=0)` | 2541 handles (all objects on storage) |
+| `GetObjectHandles(parent=0xFFFFFFFF)` | **23 handles (root only)** |
+| Actual root items | 23 |
+
 ## How This Affects mtp-tui
 
 The object inspector (`i` key) currently uses a fixed list of `ObjectPropertyCode`
@@ -85,3 +169,7 @@ variants and catches per-property errors. With patches 1 and 2 above:
   instead of hardcoding type assumptions per property code.
 - **Patch 4** would let us fetch all properties in one MTP command instead of N
   sequential `GetObjectPropValue` calls.
+
+The root listing fix (above) is the highest-impact change for mtp-tui — it would
+reduce the initial "Connecting to device" wait from ~30-60s to under 1s on the
+Kindle Paperwhite.
