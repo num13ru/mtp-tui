@@ -82,7 +82,10 @@ impl App {
             return;
         }
 
-        let title = if self.device_loading {
+        let title = if self.device_connecting {
+            let spinner = SPINNER_FRAMES[self.spinner_tick % SPINNER_FRAMES.len()];
+            format!(" Device (connecting…) {} ", spinner)
+        } else if self.device_loading {
             let spinner = SPINNER_FRAMES[self.spinner_tick % SPINNER_FRAMES.len()];
             format!(
                 " {} {} {} ",
@@ -98,11 +101,15 @@ impl App {
         let block = pane_block(title, self.focus == FocusPane::Device);
 
         if self.device_loading && self.device.entries.is_empty() {
-            let msg = match self.loading_progress {
-                Some((fetched, total)) if total > 0 => {
-                    format!("Loading ({fetched}/{total})…")
+            let msg = if self.device_connecting {
+                "Connecting to device…".into()
+            } else {
+                match self.loading_progress {
+                    Some((fetched, total)) if total > 0 => {
+                        format!("Loading ({fetched}/{total})…")
+                    }
+                    _ => "Loading…".into(),
                 }
-                _ => "Loading…".into(),
             };
             let paragraph = Paragraph::new(msg)
                 .block(block)

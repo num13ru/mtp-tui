@@ -21,6 +21,7 @@ enum ListingMsg {
         backend: Box<dyn DeviceBackend>,
         result: Result<Vec<DeviceEntry>>,
     },
+    InitFailed(String),
 }
 
 pub struct App {
@@ -37,6 +38,7 @@ pub struct App {
     pub confirm_dialog: Option<ConfirmDialog>,
     pub text_input_dialog: Option<TextInputDialog>,
     pub device_loading: bool,
+    pub device_connecting: bool,
     pub loading_progress: Option<(usize, usize)>,
     pub spinner_tick: usize,
     should_quit: bool,
@@ -50,55 +52,47 @@ impl App {
         let host_cwd = std::env::current_dir().context("failed to get current directory")?;
         let host = PaneState::new(Self::read_host_dir(&host_cwd)?);
 
-        let (backend, device, device_error, device_name, device_path, status) =
-            match MtpBackend::new() {
-                Ok(b) => {
-                    let backend: Box<dyn DeviceBackend> = Box::new(b);
-                    let entries = backend.list_current_dir()?;
-                    let name = backend.device_name().to_string();
-                    let path = backend.current_path().to_string();
-                    let status = format!("Connected to {}", name);
-                    (
-                        Some(backend),
-                        PaneState::new(entries),
-                        None,
-                        name,
-                        path,
-                        status,
-                    )
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = MtpBackend::new().and_then(|b| {
+                let backend: Box<dyn DeviceBackend> = Box::new(b);
+                let entries = backend.list_current_dir()?;
+                Ok((backend, entries))
+            });
+            match result {
+                Ok((backend, entries)) => {
+                    tx.send(ListingMsg::Done {
+                        backend,
+                        result: Ok(entries),
+                    })
+                    .ok();
                 }
                 Err(e) => {
-                    let msg = format!("{e:#}");
-                    (
-                        None,
-                        PaneState::new(vec![]),
-                        Some(msg),
-                        String::new(),
-                        String::new(),
-                        "No device connected".into(),
-                    )
+                    tx.send(ListingMsg::InitFailed(format!("{e:#}"))).ok();
                 }
-            };
+            }
+        });
 
         Ok(Self {
             host_cwd,
             host,
-            device,
+            device: PaneState::new(vec![]),
             focus: FocusPane::Host,
-            backend,
-            device_error,
-            device_name_cached: device_name,
-            device_path_cached: device_path,
-            status,
+            backend: None,
+            device_error: None,
+            device_name_cached: String::new(),
+            device_path_cached: String::new(),
+            status: "Connecting to device…".into(),
             show_help: false,
             confirm_dialog: None,
             text_input_dialog: None,
-            device_loading: false,
+            device_loading: true,
+            device_connecting: true,
             loading_progress: None,
             spinner_tick: 0,
             should_quit: false,
             last_tick: Instant::now(),
-            dir_rx: None,
+            dir_rx: Some(rx),
             device_selected_name: None,
         })
     }
@@ -156,8 +150,13 @@ impl App {
                     self.loading_progress = Some((fetched, total));
                 }
                 ListingMsg::Done { backend, result } => {
+                    let was_connecting = self.device_connecting;
+                    self.device_connecting = false;
                     self.device_name_cached = backend.device_name().to_string();
                     self.device_path_cached = backend.current_path().to_string();
+                    if was_connecting {
+                        self.status = format!("Connected to {}", self.device_name_cached);
+                    }
                     self.backend = Some(backend);
                     self.device_loading = false;
                     self.loading_progress = None;
@@ -173,6 +172,15 @@ impl App {
                         }
                         Err(e) => self.status = format!("Error: {e:#}"),
                     }
+                    return;
+                }
+                ListingMsg::InitFailed(msg) => {
+                    self.device_connecting = false;
+                    self.device_loading = false;
+                    self.loading_progress = None;
+                    self.dir_rx = None;
+                    self.device_error = Some(msg);
+                    self.status = "No device connected".into();
                     return;
                 }
             }
