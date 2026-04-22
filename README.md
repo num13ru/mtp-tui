@@ -4,7 +4,7 @@
 
 A terminal file manager for MTP devices (Android phones, Kindle, etc.) on macOS.
 
-Two-pane layout: local filesystem on the left, device storage on the right. Browse both, push and pull files.
+Two-pane layout: local filesystem on the left, device storage on the right. Browse, push, pull, delete, rename, and create directories.
 
 Built with [ratatui](https://ratatui.rs) and [mtp-rs](https://github.com/vdavid/mtp-rs). Pure Rust, no libmtp/libusb.
 
@@ -32,9 +32,14 @@ sudo killall ptpcamerad
 | `Backspace` | Go to parent |
 | `p` | Push selected host file to device |
 | `g` | Pull selected device file to host |
+| `d` | Delete selected device entry |
+| `m` | Create directory on device |
+| `R` | Rename selected device entry |
 | `r` | Refresh both panes |
 | `?` | Toggle help overlay |
-| `q` | Quit |
+| `Esc` | Close dialog / help |
+| `q` | Quit (confirms) |
+| `Ctrl+C` | Force quit |
 
 ## Diagnostics
 
@@ -56,8 +61,10 @@ Early stage. Working:
 
 - Push file to device (`p`) with overwrite confirmation
 - Pull file from device (`g`) with overwrite confirmation
-
-Not yet implemented: mkdir, delete, rename.
+- Delete file/directory on device (`d`) with confirmation
+- Create directory on device (`m`)
+- Rename file/directory on device (`R`)
+- Quit confirmation dialog
 
 See [ROADMAP.md](ROADMAP.md) for planned improvements.
 

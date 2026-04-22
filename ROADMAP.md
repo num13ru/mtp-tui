@@ -69,21 +69,24 @@ with the same name already exists on the host, a modal confirmation dialog asks
 whether to overwrite. The host listing refreshes automatically after a
 successful pull.
 
-### Create directory
+### Create directory **(done)**
 
-Implement `mkdir` using `Storage::create_folder()`. Prompt for directory name
-via an inline text input widget.
+Uses `Storage::create_folder()` via the `m` key. A modal text input dialog
+prompts for the directory name. The device listing refreshes automatically
+after creation.
 
-### Delete file/directory
+### Delete file/directory **(done)**
 
-Implement `delete` using `Storage::delete()`. Require confirmation before
-executing.
+Uses `Storage::delete()` via the `d` key. A confirmation dialog (Y/N) is shown
+before executing. The device listing refreshes automatically after deletion,
+preserving the current selection position.
 
-### Rename file/directory
+### Rename file/directory **(done)**
 
-Implement `rename` using `Storage::rename()`. The device supports
-`SetObjectPropValue` (0x9804). Use an inline text input widget pre-filled with
-the current name.
+Uses `Storage::rename()` (SetObjectPropValue 0x9804) via the `R` key. A modal
+text input dialog is pre-filled with the current name. Checks
+`MtpDevice::supports_rename()` and bails with a clear error if the device
+doesn't support it.
 
 ### Bulk operations
 
@@ -109,8 +112,9 @@ the visible list as the user types.
 ### Confirmation dialogs **(done)**
 
 Reusable modal dialog (`ConfirmDialog` / `ConfirmAction`) for destructive
-operations. Y/Enter to confirm, N/Esc to cancel. Currently used for overwrite-
-on-push; designed to be extended for delete, rename, etc.
+operations. Y/Enter to confirm, N/Esc to cancel. Used for overwrite-on-push,
+overwrite-on-pull, delete, and quit. A separate `TextInputDialog` provides
+free-text input for mkdir and rename.
 
 ### Configurable keybindings
 
