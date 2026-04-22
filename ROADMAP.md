@@ -1,6 +1,6 @@
 # Roadmap
 
-Planned improvements for mac-mtp-tui, roughly ordered by priority.
+Planned improvements for mtp-tui, roughly ordered by priority.
 
 Items marked with **(done)** are implemented and shipped.
 
@@ -118,7 +118,7 @@ free-text input for mkdir and rename.
 
 ### Configurable keybindings
 
-Read keybindings from a config file (`~/.config/mac-mtp-tui/config.toml`) so
+Read keybindings from a config file (`~/.config/mtp-tui/config.toml`) so
 users can remap keys.
 
 ## Device handling
@@ -146,4 +146,4 @@ releases and attaches it to a GitHub Release.
 
 ### Homebrew formula
 
-Publish a Homebrew tap so users can install with `brew install mac-mtp-tui`.
+Publish a Homebrew tap so users can install with `brew install mtp-tui`.

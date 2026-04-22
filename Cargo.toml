@@ -1,5 +1,5 @@
 [package]
-name = "mac-mtp-tui"
+name = "mtp-tui"
 version = "0.1.0"
 edition = "2024"
 

@@ -1,8 +1,8 @@
-# mac-mtp-tui
+# mtp-tui
 ![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
-[![Rust](https://github.com/num13ru/mac-mtp-tui/actions/workflows/rust.yml/badge.svg)](https://github.com/num13ru/mac-mtp-tui/actions/workflows/rust.yml)
+[![CI](https://github.com/num13ru/mtp-tui/actions/workflows/CI.yml/badge.svg)](https://github.com/num13ru/mtp-tui/actions/workflows/CI.yml)
 
-A terminal file manager for MTP devices (Android phones, Kindle, etc.) on macOS.
+A terminal file manager for MTP devices (Android phones, Kindle, etc.).
 
 Two-pane layout: local filesystem on the left, device storage on the right. Browse, push, pull, delete, rename, and create directories.
 
@@ -15,6 +15,8 @@ Connect an MTP device via USB, then:
 ```
 cargo run
 ```
+
+### macOS
 
 If macOS grabs the device first:
 

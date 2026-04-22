@@ -55,12 +55,13 @@ impl MtpBackend {
 
         let device = rt.block_on(MtpDevice::open_first()).map_err(|e| {
             if e.is_exclusive_access() {
-                anyhow::anyhow!(
-                    "Another process holds the USB device.\n\
-                     On macOS, ptpcamerad or Android File Transfer may auto-claim MTP devices.\n\
-                     Try: sudo killall ptpcamerad\n\
-                     Original error: {e}"
-                )
+                #[cfg(target_os = "macos")]
+                let hint = "\nOn macOS, ptpcamerad or Android File Transfer may \
+                            auto-claim MTP devices.\nTry: sudo killall ptpcamerad";
+                #[cfg(not(target_os = "macos"))]
+                let hint = "";
+
+                anyhow::anyhow!("Another process holds the USB device.{hint}\nOriginal error: {e}")
             } else {
                 anyhow::anyhow!("Failed to open MTP device: {e}")
             }

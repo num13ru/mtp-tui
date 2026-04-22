@@ -748,21 +748,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mac-mtp-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "crossterm",
- "futures",
- "mtp-rs",
- "nusb",
- "ratatui",
- "rusb",
- "tokio",
-]
-
-[[package]]
 name = "mac_address"
 version = "1.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -833,6 +818,21 @@ dependencies = [
  "num_enum",
  "nusb",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "mtp-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crossterm",
+ "futures",
+ "mtp-rs",
+ "nusb",
+ "ratatui",
+ "rusb",
+ "tokio",
 ]
 
 [[package]]
