@@ -121,6 +121,11 @@ free-text input for mkdir and rename.
 Read keybindings from a config file (`~/.config/mtp-tui/config.toml`) so
 users can remap keys.
 
+### Configurable mount point / options
+
+Allow users to set a default download directory and mount-related options
+(e.g. default host path for pulls) via `~/.config/mtp-tui/config.toml`.
+
 ## Device handling
 
 ### Multi-storage support

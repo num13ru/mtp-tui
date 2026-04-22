@@ -48,7 +48,7 @@ sudo killall ptpcamerad
 Dump device capabilities, supported operations, storages, and root objects:
 
 ```
-cargo run --example mtp_capabilities
+mkdir -p log && cargo run --example mtp_capabilities > log/mtp_capabilities.log 2>&1
 ```
 
 ## Status
