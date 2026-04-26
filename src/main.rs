@@ -1,5 +1,9 @@
+#![warn(clippy::cognitive_complexity)]
+#![warn(clippy::too_many_lines)]
+
 mod app;
 mod backend;
+mod inspector;
 mod types;
 mod ui;
 

@@ -3,55 +3,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 
-use crate::backend::{DeviceBackend, MtpBackend};
+use crate::backend::MtpBackend;
 use crate::types::{
-    ConfirmAction, ConfirmDialog, DeviceEntry, DeviceEntryKind, FocusPane, HostEntry, InfoDialog,
-    InspectorData, PaneState, TextInputAction, TextInputDialog,
+    ActiveDialog, ConfirmAction, ConfirmDialog, DeviceCache, DeviceEntry, DeviceEntryKind,
+    DeviceState, FocusPane, HostEntry, InfoDialog, ListingMsg, LoadingState, PaneState,
+    TextInputAction, TextInputDialog, TextInputResult,
 };
-
-enum ListingMsg {
-    Progress {
-        fetched: usize,
-        total: usize,
-    },
-    Done {
-        backend: Box<dyn DeviceBackend>,
-        result: Result<Vec<DeviceEntry>>,
-        storage_info: Option<(u64, u64)>,
-    },
-    InitFailed(String),
-}
 
 pub struct App {
     pub host_cwd: PathBuf,
     pub host: PaneState<HostEntry>,
-    pub device: PaneState<DeviceEntry>,
+    pub device_pane: PaneState<DeviceEntry>,
     pub focus: FocusPane,
-    pub backend: Option<Box<dyn DeviceBackend>>,
-    pub device_error: Option<String>,
-    pub device_name_cached: String,
-    pub device_path_cached: String,
-    pub storage_info_cached: Option<(u64, u64)>,
+    pub device_state: DeviceState,
     pub status: String,
     pub show_help: bool,
-    pub confirm_dialog: Option<ConfirmDialog>,
-    pub text_input_dialog: Option<TextInputDialog>,
-    pub info_dialog: Option<InfoDialog>,
-    pub inspector: Option<InspectorData>,
-    pub device_loading: bool,
-    pub device_connecting: bool,
-    pub loading_progress: Option<(usize, usize)>,
-    pub spinner_tick: usize,
+    pub dialog: ActiveDialog,
     should_quit: bool,
-    last_tick: Instant,
-    dir_rx: Option<mpsc::Receiver<ListingMsg>>,
-    device_selected_name: Option<String>,
 }
 
 impl App {
@@ -62,7 +36,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let result = MtpBackend::new().and_then(|b| {
-                let backend: Box<dyn DeviceBackend> = Box::new(b);
+                let backend: Box<dyn crate::backend::DeviceBackend> = Box::new(b);
                 let entries = backend.list_current_dir()?;
                 let storage_info = backend.storage_info();
                 Ok((backend, entries, storage_info))
@@ -85,42 +59,28 @@ impl App {
         Ok(Self {
             host_cwd,
             host,
-            device: PaneState::new(vec![]),
+            device_pane: PaneState::new(vec![]),
             focus: FocusPane::Host,
-            backend: None,
-            device_error: None,
-            device_name_cached: String::new(),
-            device_path_cached: String::new(),
-            storage_info_cached: None,
+            device_state: DeviceState::Connecting {
+                rx,
+                spinner_tick: 0,
+            },
             status: "Connecting to device…".into(),
             show_help: false,
-            confirm_dialog: None,
-            text_input_dialog: None,
-            info_dialog: None,
-            inspector: None,
-            device_loading: true,
-            device_connecting: true,
-            loading_progress: None,
-            spinner_tick: 0,
+            dialog: ActiveDialog::None,
             should_quit: false,
-            last_tick: Instant::now(),
-            dir_rx: Some(rx),
-            device_selected_name: None,
         })
     }
 
     pub fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         loop {
-            terminal.draw(|frame| self.draw(frame))?;
+            terminal.draw(|frame| crate::ui::draw(&self, frame))?;
 
-            let timeout = Duration::from_millis(200);
-            if event::poll(timeout)? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        self.handle_key(key)?;
-                    }
-                    _ => {}
-                }
+            if event::poll(Duration::from_millis(200))?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                self.handle_key(key)?;
             }
 
             if self.should_quit {
@@ -128,78 +88,68 @@ impl App {
             }
 
             self.poll_device_listing();
-
-            if self.device_loading {
-                self.spinner_tick = self.spinner_tick.wrapping_add(1);
-            }
-
-            if self.last_tick.elapsed() >= Duration::from_secs(5) {
-                self.last_tick = Instant::now();
-            }
+            self.device_state.tick_spinner();
         }
 
         Ok(())
     }
 
     fn poll_device_listing(&mut self) {
-        let Some(rx) = &self.dir_rx else { return };
+        let rx = match &self.device_state {
+            DeviceState::Connecting { rx, .. } => rx,
+            DeviceState::Loading(state) => &state.rx,
+            _ => return,
+        };
 
-        loop {
-            let msg = match rx.try_recv() {
-                Ok(m) => m,
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.device_loading = false;
-                    self.loading_progress = None;
-                    self.dir_rx = None;
-                    self.status = "Error: device listing thread crashed".into();
-                    return;
-                }
-            };
+        let msg = match rx.try_recv() {
+            Ok(m) => m,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.device_state = DeviceState::Disconnected { error: None };
+                self.status = "Error: device listing thread crashed".into();
+                return;
+            }
+        };
 
-            match msg {
-                ListingMsg::Progress { fetched, total } => {
-                    self.loading_progress = Some((fetched, total));
+        match msg {
+            ListingMsg::Progress { fetched, total } => {
+                if let DeviceState::Loading(state) = &mut self.device_state {
+                    state.progress = Some((fetched, total));
                 }
-                ListingMsg::Done {
-                    backend,
-                    result,
+            }
+            ListingMsg::Done {
+                backend,
+                result,
+                storage_info,
+            } => {
+                let was_connecting = matches!(self.device_state, DeviceState::Connecting { .. });
+                let selected_name = match &self.device_state {
+                    DeviceState::Loading(state) => state.selected_name.clone(),
+                    _ => None,
+                };
+
+                let cache = DeviceCache {
+                    name: backend.device_name().to_string(),
+                    path: backend.current_path().to_string(),
                     storage_info,
-                } => {
-                    let was_connecting = self.device_connecting;
-                    self.device_connecting = false;
-                    self.device_name_cached = backend.device_name().to_string();
-                    self.device_path_cached = backend.current_path().to_string();
-                    self.storage_info_cached = storage_info;
-                    if was_connecting {
-                        self.status = format!("Connected to {}", self.device_name_cached);
-                    }
-                    self.backend = Some(backend);
-                    self.device_loading = false;
-                    self.loading_progress = None;
-                    self.dir_rx = None;
-                    match result {
-                        Ok(entries) => {
-                            self.device.entries = entries;
-                            self.device.restore_selection_by_name(
-                                self.device_selected_name.as_deref(),
-                                |e| &e.name,
-                            );
-                            self.device_selected_name = None;
-                        }
-                        Err(e) => self.status = format!("Error: {e:#}"),
-                    }
-                    return;
+                };
+                if was_connecting {
+                    self.status = format!("Connected to {}", cache.name);
                 }
-                ListingMsg::InitFailed(msg) => {
-                    self.device_connecting = false;
-                    self.device_loading = false;
-                    self.loading_progress = None;
-                    self.dir_rx = None;
-                    self.device_error = Some(msg);
-                    self.status = "No device connected".into();
-                    return;
+
+                self.device_state = DeviceState::Connected { backend, cache };
+                match result {
+                    Ok(entries) => {
+                        self.device_pane.entries = entries;
+                        self.device_pane
+                            .restore_selection_by_name(selected_name.as_deref(), |e| &e.name);
+                    }
+                    Err(e) => self.status = format!("Error: {e:#}"),
                 }
+            }
+            ListingMsg::InitFailed(msg) => {
+                self.device_state = DeviceState::Disconnected { error: Some(msg) };
+                self.status = "No device connected".into();
             }
         }
     }
@@ -213,195 +163,151 @@ impl App {
     }
 
     fn spawn_device_listing_inner(&mut self, reset_selection: bool) {
-        let Some(backend) = self.backend.take() else {
+        let prev = std::mem::replace(
+            &mut self.device_state,
+            DeviceState::Disconnected { error: None },
+        );
+        let DeviceState::Connected { backend, cache } = prev else {
             return;
         };
 
-        if reset_selection {
-            self.device_selected_name = None;
-            self.device.selected = 0;
-        } else if self.device_selected_name.is_none() {
-            self.device_selected_name = self.device.selected().map(|e| e.name.clone());
-        }
+        let selected_name = if reset_selection {
+            self.device_pane.selected = 0;
+            None
+        } else {
+            self.device_pane.selected().map(|e| e.name.clone())
+        };
 
-        self.device_loading = true;
-        self.loading_progress = None;
-        self.spinner_tick = 0;
-        self.device.entries.clear();
-
-        let (tx, rx) = mpsc::channel();
-        self.dir_rx = Some(rx);
-
-        thread::spawn(move || {
-            let mut backend = backend;
-            let progress_tx = tx.clone();
-            let result = backend.list_current_dir_with_progress(&|fetched, total| {
-                progress_tx
-                    .send(ListingMsg::Progress { fetched, total })
-                    .ok();
-            });
-            let storage_info = backend.refresh_storage_info();
-            tx.send(ListingMsg::Done {
-                backend,
-                result,
-                storage_info,
-            })
-            .ok();
-        });
+        self.device_pane.entries.clear();
+        self.start_listing_thread(backend, cache, selected_name);
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
-        if self.inspector.is_some() {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('i') | KeyCode::Char('q') => {
-                    self.inspector = None;
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if let Some(ref mut data) = self.inspector {
-                        data.scroll_offset = data.scroll_offset.saturating_add(1);
-                    }
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if let Some(ref mut data) = self.inspector {
-                        data.scroll_offset = data.scroll_offset.saturating_sub(1);
-                    }
-                }
-                _ => {}
+        match &self.dialog {
+            ActiveDialog::Inspector(_) => {
+                self.handle_inspector_key(key);
+                return Ok(());
             }
+            ActiveDialog::Info(_) => {
+                self.dialog = ActiveDialog::None;
+                return Ok(());
+            }
+            ActiveDialog::TextInput(_) => {
+                self.handle_text_input_key(key);
+                return Ok(());
+            }
+            ActiveDialog::Confirm(_) => {
+                self.handle_confirm_key(key);
+                return Ok(());
+            }
+            ActiveDialog::None => {}
+        }
+
+        if self.device_state.is_loading() && self.focus == FocusPane::Device {
+            self.handle_loading_key(key);
             return Ok(());
         }
 
-        if self.info_dialog.is_some() {
-            self.info_dialog = None;
-            return Ok(());
-        }
+        self.handle_normal_key(key)
+    }
 
-        if let Some(mut dialog) = self.text_input_dialog.take() {
-            match key.code {
-                KeyCode::Esc => {
-                    self.status = "Cancelled".into();
-                }
-                KeyCode::Enter => {
-                    let input = dialog.input.trim().to_string();
-                    if input.is_empty() {
-                        self.status = "Empty name, cancelled".into();
-                    } else {
-                        self.submit_text_input(dialog.on_submit, &input);
-                    }
-                }
-                KeyCode::Char(c) => {
-                    dialog.input.insert(dialog.cursor_pos, c);
-                    dialog.cursor_pos += c.len_utf8();
-                    self.text_input_dialog = Some(dialog);
-                }
-                KeyCode::Backspace => {
-                    if dialog.cursor_pos > 0 {
-                        let prev = dialog.input[..dialog.cursor_pos]
-                            .chars()
-                            .last()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(0);
-                        dialog.cursor_pos -= prev;
-                        dialog.input.remove(dialog.cursor_pos);
-                    }
-                    self.text_input_dialog = Some(dialog);
-                }
-                KeyCode::Delete => {
-                    if dialog.cursor_pos < dialog.input.len() {
-                        dialog.input.remove(dialog.cursor_pos);
-                    }
-                    self.text_input_dialog = Some(dialog);
-                }
-                KeyCode::Left => {
-                    if dialog.cursor_pos > 0 {
-                        let prev = dialog.input[..dialog.cursor_pos]
-                            .chars()
-                            .last()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(0);
-                        dialog.cursor_pos -= prev;
-                    }
-                    self.text_input_dialog = Some(dialog);
-                }
-                KeyCode::Right => {
-                    if dialog.cursor_pos < dialog.input.len() {
-                        let next = dialog.input[dialog.cursor_pos..]
-                            .chars()
-                            .next()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(0);
-                        dialog.cursor_pos += next;
-                    }
-                    self.text_input_dialog = Some(dialog);
-                }
-                KeyCode::Home => {
-                    dialog.cursor_pos = 0;
-                    self.text_input_dialog = Some(dialog);
-                }
-                KeyCode::End => {
-                    dialog.cursor_pos = dialog.input.len();
-                    self.text_input_dialog = Some(dialog);
-                }
-                _ => {
-                    self.text_input_dialog = Some(dialog);
+    fn handle_inspector_key(&mut self, key: KeyEvent) {
+        let ActiveDialog::Inspector(ref mut data) = self.dialog else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('i') | KeyCode::Char('q') => {
+                self.dialog = ActiveDialog::None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                data.scroll_offset = data.scroll_offset.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                data.scroll_offset = data.scroll_offset.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_text_input_key(&mut self, key: KeyEvent) {
+        let ActiveDialog::TextInput(ref mut dialog) = self.dialog else {
+            return;
+        };
+        match dialog.handle_key(key) {
+            TextInputResult::Consumed => {}
+            TextInputResult::Cancel => {
+                self.status = "Cancelled".into();
+                self.dialog = ActiveDialog::None;
+            }
+            TextInputResult::Submit(input) => {
+                let action = std::mem::replace(&mut dialog.on_submit, TextInputAction::Mkdir);
+                self.dialog = ActiveDialog::None;
+                self.submit_text_input(action, &input);
+            }
+        }
+    }
+
+    fn handle_confirm_key(&mut self, key: KeyEvent) {
+        let dialog = std::mem::replace(&mut self.dialog, ActiveDialog::None);
+        let ActiveDialog::Confirm(dialog) = dialog else {
+            return;
+        };
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.execute_confirm(dialog.on_confirm);
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.status = "Cancelled".into();
+            }
+            _ => {
+                self.dialog = ActiveDialog::Confirm(dialog);
+            }
+        }
+    }
+
+    fn execute_confirm(&mut self, action: ConfirmAction) {
+        match action {
+            ConfirmAction::OverwritePush { source, delete_id } => {
+                if let Err(e) = self.do_push_file(&source, Some(&delete_id)) {
+                    self.status = format!("Error: {e:#}");
                 }
             }
-            return Ok(());
-        }
-
-        if let Some(dialog) = self.confirm_dialog.take() {
-            match key.code {
-                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    match dialog.on_confirm {
-                        ConfirmAction::OverwritePush { source, delete_id } => {
-                            if let Err(e) = self.do_push_file(&source, Some(&delete_id)) {
-                                self.status = format!("Error: {e:#}");
-                            }
-                        }
-                        ConfirmAction::OverwritePull { entry_id, filename } => {
-                            if let Err(e) = self.do_pull_file(&entry_id, &filename) {
-                                self.status = format!("Error: {e:#}");
-                            }
-                        }
-                        ConfirmAction::Delete { entry_id, name } => {
-                            let result = self.backend.as_mut().map(|b| b.delete(&entry_id));
-                            match result {
-                                Some(Ok(())) => {
-                                    self.storage_info_cached =
-                                        self.backend.as_ref().and_then(|b| b.storage_info());
-                                    self.status = format!("Deleted {name}");
-                                    self.spawn_device_listing_preserving_selection();
-                                }
-                                Some(Err(e)) => self.status = format!("Error: {e:#}"),
-                                None => self.status = "No device connected".into(),
-                            }
-                        }
-                        ConfirmAction::Quit => {
-                            self.should_quit = true;
-                        }
+            ConfirmAction::OverwritePull { entry_id, filename } => {
+                if let Err(e) = self.do_pull_file(&entry_id, &filename) {
+                    self.status = format!("Error: {e:#}");
+                }
+            }
+            ConfirmAction::Delete { entry_id, name } => {
+                let DeviceState::Connected { backend, cache } = &mut self.device_state else {
+                    self.status = "No device connected".into();
+                    return;
+                };
+                match backend.delete(&entry_id) {
+                    Ok(()) => {
+                        cache.storage_info = backend.storage_info();
+                        self.status = format!("Deleted {name}");
+                        self.spawn_device_listing_preserving_selection();
                     }
-                }
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.status = "Cancelled".into();
-                }
-                _ => {
-                    self.confirm_dialog = Some(dialog);
+                    Err(e) => self.status = format!("Error: {e:#}"),
                 }
             }
-            return Ok(());
-        }
-
-        if self.device_loading && self.focus == FocusPane::Device {
-            match (key.code, key.modifiers) {
-                (KeyCode::Char('q'), _) => self.confirm_quit(),
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
-                (KeyCode::Tab, _) => self.toggle_focus(),
-                (KeyCode::Char('?'), _) => self.show_help = !self.show_help,
-                _ => {}
+            ConfirmAction::Quit => {
+                self.should_quit = true;
             }
-            return Ok(());
         }
+    }
 
+    fn handle_loading_key(&mut self, key: KeyEvent) {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), _) => self.confirm_quit(),
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
+            (KeyCode::Tab, _) => self.toggle_focus(),
+            (KeyCode::Char('?'), _) => self.show_help = !self.show_help,
+            _ => {}
+        }
+    }
+
+    fn handle_normal_key(&mut self, key: KeyEvent) -> Result<()> {
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), _) => self.confirm_quit(),
             (KeyCode::Esc, _) if self.show_help => self.show_help = false,
@@ -455,14 +361,14 @@ impl App {
     fn move_up(&mut self) {
         match self.focus {
             FocusPane::Host => self.host.select_prev(),
-            FocusPane::Device => self.device.select_prev(),
+            FocusPane::Device => self.device_pane.select_prev(),
         }
     }
 
     fn move_down(&mut self) {
         match self.focus {
             FocusPane::Host => self.host.select_next(),
-            FocusPane::Device => self.device.select_next(),
+            FocusPane::Device => self.device_pane.select_next(),
         }
     }
 
@@ -481,18 +387,18 @@ impl App {
                 }
             }
             FocusPane::Device => {
-                let Some(backend) = &mut self.backend else {
+                let DeviceState::Connected { backend, cache } = &mut self.device_state else {
                     self.status = "No device connected".into();
                     return Ok(());
                 };
-                let Some(entry) = self.device.selected().cloned() else {
+                let Some(entry) = self.device_pane.selected().cloned() else {
                     return Ok(());
                 };
                 if entry.kind == DeviceEntryKind::Directory {
-                    self.device.push_cursor(entry.name.clone());
+                    self.device_pane.push_cursor(entry.name.clone());
                     backend.enter_dir(&entry.id, &entry.name)?;
-                    self.device_path_cached = backend.current_path().to_string();
-                    self.status = format!("Device: {}", self.device_path_cached);
+                    cache.path = backend.current_path().to_string();
+                    self.status = format!("Device: {}", cache.path);
                     self.spawn_device_listing();
                 }
             }
@@ -511,15 +417,26 @@ impl App {
                 }
             }
             FocusPane::Device => {
-                let Some(backend) = &mut self.backend else {
+                let DeviceState::Connected { backend, cache } = &mut self.device_state else {
                     self.status = "No device connected".into();
                     return Ok(());
                 };
-                self.device_selected_name = self.device.pop_cursor_name();
+                let pop_name = self.device_pane.pop_cursor_name();
                 backend.go_up()?;
-                self.device_path_cached = backend.current_path().to_string();
-                self.status = format!("Device: {}", self.device_path_cached);
-                self.spawn_device_listing_preserving_selection();
+                cache.path = backend.current_path().to_string();
+                self.status = format!("Device: {}", cache.path);
+
+                // Stash the popped name so spawn_device_listing_inner uses it
+                // instead of the current selection.
+                let prev = std::mem::replace(
+                    &mut self.device_state,
+                    DeviceState::Disconnected { error: None },
+                );
+                let DeviceState::Connected { backend, cache } = prev else {
+                    unreachable!();
+                };
+                self.device_state = DeviceState::Connected { backend, cache };
+                self.spawn_device_listing_inner_with_name(pop_name);
             }
         }
         Ok(())
@@ -528,7 +445,7 @@ impl App {
     fn refresh(&mut self) -> Result<()> {
         self.host
             .update_entries(Self::read_host_dir(&self.host_cwd)?, |e| &e.name);
-        if self.backend.is_some() {
+        if matches!(self.device_state, DeviceState::Connected { .. }) {
             self.spawn_device_listing_preserving_selection();
         }
         self.status = "Refreshed".into();
@@ -536,7 +453,7 @@ impl App {
     }
 
     fn copy_host_to_device(&mut self) -> Result<()> {
-        if self.backend.is_none() {
+        if !matches!(self.device_state, DeviceState::Connected { .. }) {
             self.status = "No device connected".into();
             return Ok(());
         }
@@ -550,13 +467,13 @@ impl App {
 
         let filename = &entry.name;
         let existing = self
-            .device
+            .device_pane
             .entries
             .iter()
             .find(|d| d.name == *filename && d.kind == DeviceEntryKind::File);
 
         if let Some(existing) = existing {
-            self.confirm_dialog = Some(ConfirmDialog {
+            self.dialog = ActiveDialog::Confirm(ConfirmDialog {
                 title: "Overwrite?".into(),
                 message: format!("\"{filename}\" already exists on device. Overwrite?"),
                 on_confirm: ConfirmAction::OverwritePush {
@@ -572,7 +489,9 @@ impl App {
     }
 
     fn do_push_file(&mut self, source: &Path, delete_id: Option<&str>) -> Result<()> {
-        let backend = self.backend.as_mut().context("no device connected")?;
+        let DeviceState::Connected { backend, cache } = &mut self.device_state else {
+            anyhow::bail!("no device connected");
+        };
         let filename = source
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -585,19 +504,19 @@ impl App {
 
         self.status = format!("Pushing {filename}...");
         backend.push_file(source)?;
+        cache.storage_info = backend.storage_info();
 
-        self.storage_info_cached = self.backend.as_ref().and_then(|b| b.storage_info());
         self.status = format!("Pushed {filename}");
         self.spawn_device_listing_preserving_selection();
         Ok(())
     }
 
     fn copy_device_to_host(&mut self) -> Result<()> {
-        if self.backend.is_none() {
+        if !matches!(self.device_state, DeviceState::Connected { .. }) {
             self.status = "No device connected".into();
             return Ok(());
         }
-        let Some(entry) = self.device.selected() else {
+        let Some(entry) = self.device_pane.selected() else {
             return Ok(());
         };
         if entry.kind == DeviceEntryKind::Directory {
@@ -609,7 +528,7 @@ impl App {
         let filename = entry.name.clone();
 
         if self.host_cwd.join(&filename).exists() {
-            self.confirm_dialog = Some(ConfirmDialog {
+            self.dialog = ActiveDialog::Confirm(ConfirmDialog {
                 title: "Overwrite?".into(),
                 message: format!("\"{filename}\" already exists on host. Overwrite?"),
                 on_confirm: ConfirmAction::OverwritePull { entry_id, filename },
@@ -621,7 +540,9 @@ impl App {
     }
 
     fn do_pull_file(&mut self, entry_id: &str, filename: &str) -> Result<()> {
-        let backend = self.backend.as_mut().context("no device connected")?;
+        let DeviceState::Connected { backend, .. } = &mut self.device_state else {
+            anyhow::bail!("no device connected");
+        };
 
         self.status = format!("Pulling {filename}...");
         backend.pull_file(entry_id, filename, &self.host_cwd)?;
@@ -634,33 +555,37 @@ impl App {
     fn submit_text_input(&mut self, action: TextInputAction, input: &str) {
         match action {
             TextInputAction::Mkdir => {
-                let result = self.backend.as_mut().map(|b| b.mkdir(input));
-                match result {
-                    Some(Ok(())) => {
-                        self.storage_info_cached =
-                            self.backend.as_ref().and_then(|b| b.storage_info());
+                let DeviceState::Connected { backend, cache } = &mut self.device_state else {
+                    self.status = "No device connected".into();
+                    return;
+                };
+                match backend.mkdir(input) {
+                    Ok(()) => {
+                        cache.storage_info = backend.storage_info();
                         self.status = format!("Created directory {input}");
                         self.spawn_device_listing_preserving_selection();
                     }
-                    Some(Err(e)) => self.status = format!("Error: {e:#}"),
-                    None => self.status = "No device connected".into(),
+                    Err(e) => self.status = format!("Error: {e:#}"),
                 }
             }
-            TextInputAction::Rename { entry_id } => match self.backend.as_mut() {
-                Some(backend) => match backend.rename(&entry_id, input) {
+            TextInputAction::Rename { entry_id } => {
+                let DeviceState::Connected { backend, .. } = &mut self.device_state else {
+                    self.status = "No device connected".into();
+                    return;
+                };
+                match backend.rename(&entry_id, input) {
                     Ok(()) => {
                         self.status = format!("Renamed to {input}");
                         self.spawn_device_listing_preserving_selection();
                     }
                     Err(e) => self.status = format!("Error: {e:#}"),
-                },
-                None => self.status = "No device connected".into(),
-            },
+                }
+            }
         }
     }
 
     fn confirm_quit(&mut self) {
-        self.confirm_dialog = Some(ConfirmDialog {
+        self.dialog = ActiveDialog::Confirm(ConfirmDialog {
             title: "Quit?".into(),
             message: "Are you sure you want to quit?".into(),
             on_confirm: ConfirmAction::Quit,
@@ -671,15 +596,15 @@ impl App {
         if self.focus != FocusPane::Device {
             return;
         }
-        if self.backend.is_none() {
+        if !matches!(self.device_state, DeviceState::Connected { .. }) {
             self.status = "No device connected".into();
             return;
         }
-        let Some(entry) = self.device.selected() else {
+        let Some(entry) = self.device_pane.selected() else {
             return;
         };
         let cursor_pos = entry.name.len();
-        self.text_input_dialog = Some(TextInputDialog {
+        self.dialog = ActiveDialog::TextInput(TextInputDialog {
             title: "Rename".into(),
             prompt: format!("Rename \"{}\" to:", entry.name),
             input: entry.name.clone(),
@@ -694,11 +619,11 @@ impl App {
         if self.focus != FocusPane::Device {
             return;
         }
-        if self.backend.is_none() {
+        if !matches!(self.device_state, DeviceState::Connected { .. }) {
             self.status = "No device connected".into();
             return;
         }
-        self.text_input_dialog = Some(TextInputDialog {
+        self.dialog = ActiveDialog::TextInput(TextInputDialog {
             title: "Create Directory".into(),
             prompt: "Directory name:".into(),
             input: String::new(),
@@ -711,18 +636,18 @@ impl App {
         if self.focus != FocusPane::Device {
             return;
         }
-        if self.backend.is_none() {
+        if !matches!(self.device_state, DeviceState::Connected { .. }) {
             self.status = "No device connected".into();
             return;
         }
-        let Some(entry) = self.device.selected() else {
+        let Some(entry) = self.device_pane.selected() else {
             return;
         };
         let kind = match entry.kind {
             DeviceEntryKind::Directory => "directory",
             DeviceEntryKind::File => "file",
         };
-        self.confirm_dialog = Some(ConfirmDialog {
+        self.dialog = ActiveDialog::Confirm(ConfirmDialog {
             title: "Delete?".into(),
             message: format!("Delete {kind} \"{}\"?", entry.name),
             on_confirm: ConfirmAction::Delete {
@@ -734,7 +659,7 @@ impl App {
 
     fn open_inspector(&mut self) {
         if self.focus != FocusPane::Device {
-            self.info_dialog = Some(InfoDialog {
+            self.dialog = ActiveDialog::Info(InfoDialog {
                 title: "Inspector".into(),
                 message: "Inspector is only available for device files (MTP objects).\n\
                           Switch to the device pane with Tab first."
@@ -742,11 +667,11 @@ impl App {
             });
             return;
         }
-        let Some(backend) = &self.backend else {
+        let DeviceState::Connected { backend, .. } = &self.device_state else {
             self.status = "No device connected".into();
             return;
         };
-        let Some(entry) = self.device.selected() else {
+        let Some(entry) = self.device_pane.selected() else {
             return;
         };
         let entry_id = entry.id.clone();
@@ -755,7 +680,7 @@ impl App {
         match backend.inspect_object(&entry_id) {
             Ok(data) => {
                 self.status = format!("Inspector: {entry_name}");
-                self.inspector = Some(data);
+                self.dialog = ActiveDialog::Inspector(Box::new(data));
             }
             Err(e) => {
                 self.status = format!("Error: {e:#}");
@@ -763,7 +688,53 @@ impl App {
         }
     }
 
-    fn read_host_dir(path: &Path) -> Result<Vec<HostEntry>> {
+    fn spawn_device_listing_inner_with_name(&mut self, selected_name: Option<String>) {
+        let prev = std::mem::replace(
+            &mut self.device_state,
+            DeviceState::Disconnected { error: None },
+        );
+        let DeviceState::Connected { backend, cache } = prev else {
+            return;
+        };
+
+        self.device_pane.entries.clear();
+        self.start_listing_thread(backend, cache, selected_name);
+    }
+
+    fn start_listing_thread(
+        &mut self,
+        backend: Box<dyn crate::backend::DeviceBackend>,
+        cache: DeviceCache,
+        selected_name: Option<String>,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        self.device_state = DeviceState::Loading(Box::new(LoadingState {
+            rx,
+            progress: None,
+            spinner_tick: 0,
+            cache,
+            selected_name,
+        }));
+
+        thread::spawn(move || {
+            let mut backend = backend;
+            let progress_tx = tx.clone();
+            let result = backend.list_current_dir_with_progress(&|fetched, total| {
+                progress_tx
+                    .send(ListingMsg::Progress { fetched, total })
+                    .ok();
+            });
+            let storage_info = backend.refresh_storage_info();
+            tx.send(ListingMsg::Done {
+                backend,
+                result,
+                storage_info,
+            })
+            .ok();
+        });
+    }
+
+    pub fn read_host_dir(path: &Path) -> Result<Vec<HostEntry>> {
         let mut entries = fs::read_dir(path)
             .with_context(|| format!("failed to read directory: {}", path.display()))?
             .filter_map(|result| result.ok())

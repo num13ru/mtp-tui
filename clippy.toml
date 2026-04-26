@@ -1,0 +1,11 @@
+# clippy.toml — Clippy linter configuration for mtp-tui
+#
+# Stricter thresholds than mtp-rs: a TUI app should have simpler functions
+# than a protocol library.
+#
+# Run with: cargo clippy
+# Documentation: https://doc.rust-lang.org/clippy/lint_configuration.html
+
+cognitive-complexity-threshold = 15
+too-many-arguments-threshold = 6
+too-many-lines-threshold = 80

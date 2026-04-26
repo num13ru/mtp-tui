@@ -1,9 +1,83 @@
 use std::path::PathBuf;
+use std::sync::mpsc;
+
+use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent};
+
+use crate::backend::DeviceBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusPane {
     Host,
     Device,
+}
+
+pub struct DeviceCache {
+    pub name: String,
+    pub path: String,
+    pub storage_info: Option<(u64, u64)>,
+}
+
+pub enum ListingMsg {
+    Progress {
+        fetched: usize,
+        total: usize,
+    },
+    Done {
+        backend: Box<dyn DeviceBackend>,
+        result: Result<Vec<DeviceEntry>>,
+        storage_info: Option<(u64, u64)>,
+    },
+    InitFailed(String),
+}
+
+pub struct LoadingState {
+    pub rx: mpsc::Receiver<ListingMsg>,
+    pub progress: Option<(usize, usize)>,
+    pub spinner_tick: usize,
+    pub cache: DeviceCache,
+    pub selected_name: Option<String>,
+}
+
+pub enum DeviceState {
+    Connecting {
+        rx: mpsc::Receiver<ListingMsg>,
+        spinner_tick: usize,
+    },
+    Loading(Box<LoadingState>),
+    Connected {
+        backend: Box<dyn DeviceBackend>,
+        cache: DeviceCache,
+    },
+    Disconnected {
+        error: Option<String>,
+    },
+}
+
+impl DeviceState {
+    pub fn is_loading(&self) -> bool {
+        matches!(self, Self::Connecting { .. } | Self::Loading(_))
+    }
+
+    pub fn tick_spinner(&mut self) {
+        match self {
+            Self::Connecting { spinner_tick, .. } => {
+                *spinner_tick = spinner_tick.wrapping_add(1);
+            }
+            Self::Loading(state) => {
+                state.spinner_tick = state.spinner_tick.wrapping_add(1);
+            }
+            _ => {}
+        }
+    }
+}
+
+pub enum ActiveDialog {
+    None,
+    Confirm(ConfirmDialog),
+    TextInput(TextInputDialog),
+    Info(InfoDialog),
+    Inspector(Box<InspectorData>),
 }
 
 pub struct InfoDialog {
@@ -24,12 +98,88 @@ pub enum ConfirmAction {
     Quit,
 }
 
+pub enum TextInputResult {
+    Consumed,
+    Submit(String),
+    Cancel,
+}
+
 pub struct TextInputDialog {
     pub title: String,
     pub prompt: String,
     pub input: String,
     pub cursor_pos: usize,
     pub on_submit: TextInputAction,
+}
+
+impl TextInputDialog {
+    pub fn handle_key(&mut self, key: KeyEvent) -> TextInputResult {
+        match key.code {
+            KeyCode::Esc => TextInputResult::Cancel,
+            KeyCode::Enter => {
+                let input = self.input.trim().to_string();
+                if input.is_empty() {
+                    TextInputResult::Cancel
+                } else {
+                    TextInputResult::Submit(input)
+                }
+            }
+            KeyCode::Char(c) => {
+                self.input.insert(self.cursor_pos, c);
+                self.cursor_pos += c.len_utf8();
+                TextInputResult::Consumed
+            }
+            KeyCode::Backspace => {
+                if self.cursor_pos > 0 {
+                    let prev = self.input[..self.cursor_pos]
+                        .chars()
+                        .last()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(0);
+                    self.cursor_pos -= prev;
+                    self.input.remove(self.cursor_pos);
+                }
+                TextInputResult::Consumed
+            }
+            KeyCode::Delete => {
+                if self.cursor_pos < self.input.len() {
+                    self.input.remove(self.cursor_pos);
+                }
+                TextInputResult::Consumed
+            }
+            KeyCode::Left => {
+                if self.cursor_pos > 0 {
+                    let prev = self.input[..self.cursor_pos]
+                        .chars()
+                        .last()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(0);
+                    self.cursor_pos -= prev;
+                }
+                TextInputResult::Consumed
+            }
+            KeyCode::Right => {
+                if self.cursor_pos < self.input.len() {
+                    let next = self.input[self.cursor_pos..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(0);
+                    self.cursor_pos += next;
+                }
+                TextInputResult::Consumed
+            }
+            KeyCode::Home => {
+                self.cursor_pos = 0;
+                TextInputResult::Consumed
+            }
+            KeyCode::End => {
+                self.cursor_pos = self.input.len();
+                TextInputResult::Consumed
+            }
+            _ => TextInputResult::Consumed,
+        }
+    }
 }
 
 pub enum TextInputAction {
