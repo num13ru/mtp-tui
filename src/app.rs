@@ -16,6 +16,8 @@ use crate::types::{
     TextInputAction, TextInputDialog, TextInputResult,
 };
 
+const MAX_MSGS_PER_TICK: usize = 1_000;
+
 pub struct App {
     pub host_cwd: PathBuf,
     pub host: PaneState<HostEntry>,
@@ -95,7 +97,7 @@ impl App {
     }
 
     fn poll_device_listing(&mut self) {
-        loop {
+        for _ in 0..MAX_MSGS_PER_TICK {
             let rx = match &self.device_state {
                 DeviceState::Connecting { rx, .. } => rx,
                 DeviceState::Loading(state) => &state.rx,
@@ -166,12 +168,19 @@ impl App {
     }
 
     fn spawn_device_listing_inner(&mut self, reset_selection: bool) {
+        if !matches!(self.device_state, DeviceState::Connected { .. }) {
+            debug_assert!(
+                false,
+                "spawn_device_listing_inner called in non-Connected state"
+            );
+            return;
+        }
         let prev = std::mem::replace(
             &mut self.device_state,
             DeviceState::Disconnected { error: None },
         );
         let DeviceState::Connected { backend, cache } = prev else {
-            return;
+            unreachable!();
         };
 
         let selected_name = if reset_selection {
@@ -181,7 +190,6 @@ impl App {
             self.device_pane.selected().map(|e| e.name.clone())
         };
 
-        self.device_pane.entries.clear();
         self.start_listing_thread(backend, cache, selected_name);
     }
 
@@ -681,15 +689,21 @@ impl App {
     }
 
     fn spawn_device_listing_inner_with_name(&mut self, selected_name: Option<String>) {
+        if !matches!(self.device_state, DeviceState::Connected { .. }) {
+            debug_assert!(
+                false,
+                "spawn_device_listing_inner_with_name called in non-Connected state"
+            );
+            return;
+        }
         let prev = std::mem::replace(
             &mut self.device_state,
             DeviceState::Disconnected { error: None },
         );
         let DeviceState::Connected { backend, cache } = prev else {
-            return;
+            unreachable!();
         };
 
-        self.device_pane.entries.clear();
         self.start_listing_thread(backend, cache, selected_name);
     }
 
@@ -716,7 +730,11 @@ impl App {
                     .send(ListingMsg::Progress { fetched, total })
                     .ok();
             });
-            let storage_info = backend.refresh_storage_info();
+            let storage_info = if result.is_ok() {
+                backend.refresh_storage_info()
+            } else {
+                backend.storage_info()
+            };
             tx.send(ListingMsg::Done {
                 backend,
                 result,
