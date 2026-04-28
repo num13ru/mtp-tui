@@ -7,21 +7,47 @@ A terminal file manager for MTP devices (Android phones, Kindle, etc.).
 
 Two-pane layout: local filesystem on the left, device storage on the right. Browse, push, pull, delete, rename, and create directories.
 
-Built with [ratatui](https://ratatui.rs) and [mtp-rs](https://github.com/vdavid/mtp-rs). Pure Rust, no libmtp/libusb.
+Unlike mount-based MTP helpers, mtp-tui talks to devices directly through [mtp-rs](https://github.com/num13ru/mtp-rs) and provides a two-pane file manager interface. No FUSE, no libmtp, no libusb — pure Rust on [nusb](https://crates.io/crates/nusb).
+
+Built with [ratatui](https://ratatui.rs).
 
 ![mtp-tui screenshot](assets/screenshot.png)
 
 ## Features
 
-- **Device support** — Android phones, Kindle, cameras via MTP/PTP
+- **Device support** — Android phones, Kindle, and other MTP/PTP-compatible devices.
 - **Two-pane browsing** — local filesystem + device storage side by side
 - **File transfers** — push (`p`) and pull (`g`) with overwrite confirmation
 - **File management** — delete (`d`), rename (`R`), create directory (`m`)
 - **Object inspector** *(WIP)* — view MTP metadata and properties (`i`)
-- **Async loading** — spinner and streaming progress ("Loading 42/500..."), UI never freezes
+- **Async loading** — directory listing runs in a background thread with streaming progress; entries appear incrementally
 - **Storage info** — free / total space display
 
 See [ROADMAP.md](ROADMAP.md) for planned improvements.
+
+## Why not just mount MTP?
+
+mtp-tui does not mount the device as a filesystem. It talks to the device through MTP operations directly. This avoids FUSE/libmtp dependencies, but also means some filesystem-like operations depend on device capabilities (e.g., rename requires `SetObjectPropValue` support).
+
+## Safety notes
+
+MTP does not support true atomic overwrite. When overwriting a file on the device, mtp-tui deletes the existing object before uploading the replacement. If the upload fails or the device disconnects mid-transfer, the original file is lost and manual cleanup may be required.
+
+## Tested devices
+
+| Device | OS / Firmware | Browse | Push | Pull | Delete | Rename | Notes |
+|---|---|:---:|:---:|:---:|:---:|:---:|---|
+| Kindle Paperwhite (GN433X) | — | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+
+> Rename support depends on `SetObjectPropValue (0x9804)`. Some devices advertise it but reject writes.
+
+## Known limitations
+
+- No transfer cancellation yet — large push/pull can only be interrupted with `Ctrl+C` (force quit)
+- Overwrite is not atomic (see [Safety notes](#safety-notes))
+- One device at a time, one storage at a time
+- No recursive directory push/pull
+- Behavior depends on device MTP capabilities — use [Diagnostics](#diagnostics) to inspect
 
 ## Usage
 
