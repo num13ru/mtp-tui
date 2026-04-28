@@ -41,13 +41,19 @@ impl Config {
     }
 
     pub fn host_dir(&self) -> Option<PathBuf> {
-        let raw = self.default_host_dir.as_deref()?;
-        let path = expand_tilde(raw);
+        let path = self.host_dir_expanded()?;
         if path.is_absolute() && path.is_dir() {
             Some(path)
         } else {
             None
         }
+    }
+
+    /// Returns the tilde-expanded path without checking existence.
+    /// `None` only when `default_host_dir` is unset.
+    pub fn host_dir_expanded(&self) -> Option<PathBuf> {
+        let raw = self.default_host_dir.as_deref()?;
+        Some(expand_tilde(raw))
     }
 
     pub fn device_dir(&self) -> Option<&str> {
@@ -157,5 +163,34 @@ mod tests {
         let config: Config = toml::from_str(DEFAULT_TEMPLATE).unwrap();
         assert!(config.default_host_dir.is_none());
         assert!(config.default_device_dir.is_none());
+    }
+
+    #[test]
+    fn host_dir_expanded_returns_none_when_unset() {
+        let config = Config::default();
+        assert!(config.host_dir_expanded().is_none());
+    }
+
+    #[test]
+    fn host_dir_expanded_returns_path_even_if_missing() {
+        let config = Config {
+            default_host_dir: Some("~/nonexistent_dir_abc123".into()),
+            default_device_dir: None,
+        };
+        let expanded = config.host_dir_expanded().unwrap();
+        assert!(expanded.is_absolute());
+        assert!(expanded.ends_with("nonexistent_dir_abc123"));
+        assert!(config.host_dir().is_none(), "host_dir() should be None for missing dir");
+    }
+
+    #[test]
+    fn host_dir_expanded_relative_path() {
+        let config = Config {
+            default_host_dir: Some("relative/path".into()),
+            default_device_dir: None,
+        };
+        let expanded = config.host_dir_expanded().unwrap();
+        assert!(!expanded.is_absolute());
+        assert!(config.host_dir().is_none(), "host_dir() should be None for relative path");
     }
 }

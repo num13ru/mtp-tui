@@ -27,6 +27,7 @@ pub enum ListingMsg {
         backend: Box<dyn DeviceBackend>,
         result: Result<Vec<DeviceEntry>>,
         storage_info: Option<(u64, u64)>,
+        warning: Option<String>,
     },
     InitFailed(String),
 }

@@ -31,12 +31,22 @@ pub struct App {
     pub status: String,
     pub show_help: bool,
     pub dialog: ActiveDialog,
+    pending_warning: Option<InfoDialog>,
     should_quit: bool,
 }
 
 impl App {
     pub fn new() -> Result<Self> {
         let config = Config::load();
+
+        let host_dir_warning = match (config.host_dir(), config.default_host_dir.as_deref()) {
+            (Some(_), _) => None,
+            (None, Some(raw)) => Some(format!(
+                "Can't access default_host_dir = \"{raw}\"\n\n\
+                 Using current directory instead."
+            )),
+            (None, None) => None,
+        };
 
         let host_cwd = match config.host_dir() {
             Some(dir) => dir,
@@ -50,19 +60,21 @@ impl App {
         thread::spawn(move || {
             let result = MtpBackend::new().and_then(|b| {
                 let mut backend: Box<dyn crate::backend::DeviceBackend> = Box::new(b);
-                if let Some(ref dir) = default_device_dir {
-                    navigate_to_device_dir(&mut *backend, dir);
-                }
+                let device_dir_warning = match default_device_dir {
+                    Some(ref dir) => navigate_to_device_dir(&mut *backend, dir),
+                    None => None,
+                };
                 let entries = backend.list_current_dir()?;
                 let storage_info = backend.storage_info();
-                Ok((backend, entries, storage_info))
+                Ok((backend, entries, storage_info, device_dir_warning))
             });
             match result {
-                Ok((backend, entries, storage_info)) => {
+                Ok((backend, entries, storage_info, warning)) => {
                     tx.send(ListingMsg::Done {
                         backend,
                         result: Ok(entries),
                         storage_info,
+                        warning,
                     })
                     .ok();
                 }
@@ -71,6 +83,14 @@ impl App {
                 }
             }
         });
+
+        let dialog = match host_dir_warning {
+            Some(message) => ActiveDialog::Info(InfoDialog {
+                title: "Warning".into(),
+                message,
+            }),
+            None => ActiveDialog::None,
+        };
 
         Ok(Self {
             host_cwd,
@@ -83,7 +103,8 @@ impl App {
             },
             status: "Connecting to device…".into(),
             show_help: false,
-            dialog: ActiveDialog::None,
+            dialog,
+            pending_warning: None,
             should_quit: false,
         })
     }
@@ -139,6 +160,7 @@ impl App {
                     backend,
                     result,
                     storage_info,
+                    warning,
                 } => {
                     let was_connecting =
                         matches!(self.device_state, DeviceState::Connecting { .. });
@@ -164,6 +186,20 @@ impl App {
                                 .restore_selection_by_name(selected_name.as_deref(), |e| &e.name);
                         }
                         Err(e) => self.status = format!("Error: {e:#}"),
+                    }
+
+                    if was_connecting
+                        && let Some(message) = warning
+                    {
+                        let info = InfoDialog {
+                            title: "Warning".into(),
+                            message,
+                        };
+                        if matches!(self.dialog, ActiveDialog::None) {
+                            self.dialog = ActiveDialog::Info(info);
+                        } else {
+                            self.pending_warning = Some(info);
+                        }
                     }
                 }
                 ListingMsg::InitFailed(msg) => {
@@ -199,7 +235,10 @@ impl App {
                 return Ok(());
             }
             ActiveDialog::Info(_) => {
-                self.dialog = ActiveDialog::None;
+                self.dialog = match self.pending_warning.take() {
+                    Some(next) => ActiveDialog::Info(next),
+                    None => ActiveDialog::None,
+                };
                 return Ok(());
             }
             ActiveDialog::TextInput(_) => {
@@ -840,6 +879,7 @@ impl App {
                 backend,
                 result,
                 storage_info,
+                warning: None,
             })
             .ok();
         });
@@ -878,21 +918,67 @@ pub fn read_host_dir(path: &Path) -> Result<Vec<HostEntry>> {
 }
 
 /// Walk into `device_dir` segment by segment (e.g. "/Download/Books").
-/// Stops silently at the first missing or inaccessible segment.
-fn navigate_to_device_dir(backend: &mut dyn crate::backend::DeviceBackend, device_dir: &str) {
-    for segment in device_dir.split('/').filter(|s| !s.is_empty()) {
+/// Returns a warning message if the full path couldn't be reached.
+fn navigate_to_device_dir(
+    backend: &mut dyn crate::backend::DeviceBackend,
+    device_dir: &str,
+) -> Option<String> {
+    let segments: Vec<&str> = device_dir.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return None;
+    }
+
+    for (i, segment) in segments.iter().enumerate() {
         let entries = match backend.list_current_dir() {
             Ok(e) => e,
-            Err(_) => return,
+            Err(_) => return Some(device_dir_warning(device_dir, &segments[..i])),
         };
         let Some(entry) = entries
             .iter()
-            .find(|e| e.kind == DeviceEntryKind::Directory && e.name == segment)
+            .find(|e| e.kind == DeviceEntryKind::Directory && e.name == *segment)
         else {
-            return;
+            return Some(device_dir_warning(device_dir, &segments[..i]));
         };
         if backend.enter_dir(&entry.id, &entry.name).is_err() {
-            return;
+            return Some(device_dir_warning(device_dir, &segments[..i]));
         }
+    }
+    None
+}
+
+fn device_dir_warning(configured: &str, reached_segments: &[&str]) -> String {
+    let reached = if reached_segments.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", reached_segments.join("/"))
+    };
+    format!(
+        "Can't access default_device_dir = \"{configured}\"\n\n\
+         Opened \"{reached}\" instead."
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_dir_warning_no_segments_reached() {
+        let msg = device_dir_warning("/Download/Books", &[]);
+        assert!(msg.contains("default_device_dir = \"/Download/Books\""));
+        assert!(msg.contains("Opened \"/\" instead."));
+    }
+
+    #[test]
+    fn device_dir_warning_partial_path_reached() {
+        let msg = device_dir_warning("/Download/Books/Fiction", &["Download"]);
+        assert!(msg.contains("default_device_dir = \"/Download/Books/Fiction\""));
+        assert!(msg.contains("Opened \"/Download\" instead."));
+    }
+
+    #[test]
+    fn device_dir_warning_two_segments_reached() {
+        let msg = device_dir_warning("/A/B/C", &["A", "B"]);
+        assert!(msg.contains("Opened \"/A/B\" instead."));
     }
 }
