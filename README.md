@@ -59,6 +59,21 @@ sudo killall ptpcamerad
 | `q` | Quit (confirms) |
 | `Ctrl+C` | Force quit |
 
+## Configuration
+
+On first run, mtp-tui creates a config file at `~/.config/mtp-tui/config.toml` with all options commented out. Edit it to customize behavior:
+
+```toml
+# Host pane opens here instead of the current working directory.
+# Supports ~ for home directory.
+default_host_dir = "~/Downloads"
+
+# Navigate to this device folder after connecting (default: root).
+default_device_dir = "/Download"
+```
+
+`$XDG_CONFIG_HOME` is respected when set. If the config file is missing or malformed, defaults are used silently.
+
 ## Diagnostics
 
 Dump device capabilities, supported operations, storages, and root objects:

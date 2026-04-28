@@ -11,7 +11,9 @@ futures = "0.3"
 mtp-rs = "0.13.2"
 nusb = "0.2.3"
 ratatui = "0.30.0"
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
+toml = "0.8"
 unicode-width = "0.2"
 
 [dev-dependencies]

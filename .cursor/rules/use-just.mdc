@@ -1,0 +1,9 @@
+---
+description: Use `just` for all build, check, and fix commands
+alwaysApply: true
+---
+
+# Use just
+
+Always use `just` instead of raw `cargo` commands for building, checking, and fixing.
+Never run `cargo fmt`, `cargo clippy`, or `cargo test` directly — use the just recipes which have the correct flags.

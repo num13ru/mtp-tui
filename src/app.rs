@@ -10,6 +10,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::DefaultTerminal;
 
 use crate::backend::MtpBackend;
+use crate::config::Config;
 use crate::types::{
     ActiveDialog, ConfirmAction, ConfirmDialog, DeviceCache, DeviceEntry, DeviceEntryKind,
     DeviceState, FocusPane, HostEntry, InfoDialog, ListingMsg, LoadingState, PaneState,
@@ -35,13 +36,23 @@ pub struct App {
 
 impl App {
     pub fn new() -> Result<Self> {
-        let host_cwd = std::env::current_dir().context("failed to get current directory")?;
+        let config = Config::load();
+
+        let host_cwd = match config.host_dir() {
+            Some(dir) => dir,
+            None => std::env::current_dir().context("failed to get current directory")?,
+        };
         let host = PaneState::new(read_host_dir(&host_cwd)?);
+
+        let default_device_dir = config.device_dir().map(String::from);
 
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let result = MtpBackend::new().and_then(|b| {
-                let backend: Box<dyn crate::backend::DeviceBackend> = Box::new(b);
+                let mut backend: Box<dyn crate::backend::DeviceBackend> = Box::new(b);
+                if let Some(ref dir) = default_device_dir {
+                    navigate_to_device_dir(&mut *backend, dir);
+                }
                 let entries = backend.list_current_dir()?;
                 let storage_info = backend.storage_info();
                 Ok((backend, entries, storage_info))
@@ -864,4 +875,24 @@ pub fn read_host_dir(path: &Path) -> Result<Vec<HostEntry>> {
     });
 
     Ok(entries)
+}
+
+/// Walk into `device_dir` segment by segment (e.g. "/Download/Books").
+/// Stops silently at the first missing or inaccessible segment.
+fn navigate_to_device_dir(backend: &mut dyn crate::backend::DeviceBackend, device_dir: &str) {
+    for segment in device_dir.split('/').filter(|s| !s.is_empty()) {
+        let entries = match backend.list_current_dir() {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let Some(entry) = entries
+            .iter()
+            .find(|e| e.kind == DeviceEntryKind::Directory && e.name == segment)
+        else {
+            return;
+        };
+        if backend.enter_dir(&entry.id, &entry.name).is_err() {
+            return;
+        }
+    }
 }

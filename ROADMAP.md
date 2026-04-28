@@ -121,10 +121,13 @@ free-text input for mkdir and rename.
 Read keybindings from a config file (`~/.config/mtp-tui/config.toml`) so
 users can remap keys.
 
-### Configurable mount point / options
+### Configurable mount point / options **(done)**
 
-Allow users to set a default download directory and mount-related options
-(e.g. default host path for pulls) via `~/.config/mtp-tui/config.toml`.
+TOML config file at `~/.config/mtp-tui/config.toml`, auto-created on first run
+with a commented-out template. Supports `default_host_dir` (with `~` expansion)
+to override the starting host pane directory, and `default_device_dir` to
+auto-navigate into a device folder on connect. `$XDG_CONFIG_HOME` is respected.
+Falls back silently to defaults on any error.
 
 ## Device handling
 
