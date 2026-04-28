@@ -833,6 +833,7 @@ dependencies = [
  "ratatui",
  "rusb",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]

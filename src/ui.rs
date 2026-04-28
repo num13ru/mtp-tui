@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::Path;
 
 use ratatui::Frame;
@@ -5,6 +6,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::types::{ActiveDialog, DeviceEntryKind, DeviceState, FocusPane, HostEntry, PaneState};
@@ -237,7 +239,10 @@ fn draw_inspector(app: &App, frame: &mut Frame) {
     let offset = data.scroll_offset.min(max_offset);
     let visible: Vec<Line> = lines.into_iter().skip(offset).take(inner_height).collect();
 
-    let title = format!(" Inspector: {} ", data.filename);
+    // " Inspector: " (13) + " " (1) trailing + 2 border chars = 16 overhead
+    let name_budget = (area.width as usize).saturating_sub(16);
+    let display_name = truncate_middle(&data.filename, name_budget);
+    let title = format!(" Inspector: {display_name} ");
     let paragraph =
         Paragraph::new(visible).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(paragraph, area);
@@ -312,12 +317,13 @@ fn draw_text_input_dialog(app: &App, frame: &mut Frame) {
     };
 
     let max_width = (frame.area().width).min(50);
-    let height: u16 = 8;
+    let inner_width = max_width.saturating_sub(2) as usize;
+    let prompt_lines = wrapped_line_count(&dialog.prompt, inner_width as u16);
+    // border-top + blank + prompt + blank + input + blank + hint + border-bottom
+    let height: u16 = 2 + 1 + prompt_lines + 1 + 1 + 1 + 1;
 
     let area = centered_fixed(frame.area(), max_width, height);
     frame.render_widget(Clear, area);
-
-    let inner_width = max_width.saturating_sub(2) as usize;
     let input = &dialog.input;
     let chars: Vec<(usize, char)> = input.char_indices().collect();
     let char_count = chars.len();
@@ -400,14 +406,7 @@ fn draw_info_dialog(app: &App, frame: &mut Frame) {
     let msg_lines: u16 = dialog
         .message
         .lines()
-        .map(|line| {
-            if inner_width > 0 {
-                (line.len() as u16).div_ceil(inner_width)
-            } else {
-                1
-            }
-            .max(1)
-        })
+        .map(|line| wrapped_line_count(line, inner_width))
         .sum();
     let height = 2 + 1 + msg_lines + 1 + 1;
 
@@ -438,12 +437,8 @@ fn draw_confirm_dialog(app: &App, frame: &mut Frame) {
 
     let max_width = (frame.area().width).min(60);
     let inner_width = max_width.saturating_sub(2);
-    let msg_len = dialog.message.len() as u16;
-    let msg_lines = if inner_width > 0 {
-        msg_len.div_ceil(inner_width)
-    } else {
-        1
-    };
+    let msg_lines = wrapped_line_count(&dialog.message, inner_width);
+    // border-top + blank + message + blank + buttons + border-bottom
     let height = 2 + 1 + msg_lines + 1 + 1;
 
     let area = centered_fixed(frame.area(), max_width, height);
@@ -473,11 +468,17 @@ fn draw_transfer_dialog(app: &App, frame: &mut Frame) {
         return;
     };
 
-    let spinner = SPINNER_FRAMES[dialog.spinner_tick % SPINNER_FRAMES.len()];
-    let msg = format!("{spinner} {} {}...", dialog.direction, dialog.filename);
+    let max_width = (frame.area().width).min(60);
+    let inner_width = max_width.saturating_sub(2);
 
-    let max_width = (frame.area().width).min(50);
-    let height: u16 = 5;
+    let spinner = SPINNER_FRAMES[dialog.spinner_tick % SPINNER_FRAMES.len()];
+    // "⠋ Pushing " = spinner(1) + space(1) + direction(~7) + space(1) + "..."(3) = ~13 overhead
+    let name_budget = (inner_width as usize).saturating_sub(13);
+    let display_name = truncate_middle(&dialog.filename, name_budget);
+    let msg = format!("{spinner} {} {display_name}...", dialog.direction);
+
+    let msg_lines = wrapped_line_count(&msg, inner_width);
+    let height = 2 + 1 + msg_lines;
 
     let area = centered_fixed(frame.area(), max_width, height);
     frame.render_widget(Clear, area);
@@ -510,6 +511,54 @@ pub fn format_size(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// Truncate `s` with a middle ellipsis so its display width fits in `max_width`.
+/// Preserves the head (human-recognizable prefix) and tail (extension).
+/// Returns `Cow::Borrowed` when no truncation is needed (zero-alloc fast path).
+pub fn truncate_middle(s: &str, max_width: usize) -> Cow<'_, str> {
+    let w = UnicodeWidthStr::width(s);
+    if w <= max_width || max_width < 5 {
+        return Cow::Borrowed(s);
+    }
+    let ellipsis = "…";
+    let budget = max_width - 1; // ellipsis is 1 display column wide
+    let head_budget = budget / 2;
+    let tail_budget = budget - head_budget;
+
+    let mut head_end = 0;
+    let mut head_w = 0;
+    for (i, ch) in s.char_indices() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if head_w + cw > head_budget {
+            break;
+        }
+        head_w += cw;
+        head_end = i + ch.len_utf8();
+    }
+
+    let mut tail_start = s.len();
+    let mut tail_w = 0;
+    for (i, ch) in s.char_indices().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if tail_w + cw > tail_budget {
+            break;
+        }
+        tail_w += cw;
+        tail_start = i;
+    }
+
+    Cow::Owned(format!("{}{ellipsis}{}", &s[..head_end], &s[tail_start..]))
+}
+
+/// Count how many terminal lines a string occupies when soft-wrapped at `inner_width`.
+/// Uses display width (not byte length) for correctness with wide/multibyte chars.
+fn wrapped_line_count(s: &str, inner_width: u16) -> u16 {
+    if inner_width == 0 {
+        return 1;
+    }
+    let w = UnicodeWidthStr::width(s) as u16;
+    w.div_ceil(inner_width).max(1)
 }
 
 fn centered_fixed(area: Rect, width: u16, height: u16) -> Rect {

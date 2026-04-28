@@ -15,6 +15,9 @@ use crate::types::{
     DeviceState, FocusPane, HostEntry, InfoDialog, ListingMsg, LoadingState, PaneState,
     TextInputAction, TextInputDialog, TextInputResult, TransferDialog, TransferKind, TransferMsg,
 };
+use crate::ui::truncate_middle;
+
+const DIALOG_FILENAME_MAX: usize = 40;
 
 const MAX_MSGS_PER_TICK: usize = 1_000;
 
@@ -472,7 +475,10 @@ impl App {
         if let Some(existing) = existing {
             self.dialog = ActiveDialog::Confirm(ConfirmDialog {
                 title: "Overwrite?".into(),
-                message: format!("\"{filename}\" already exists on device. Overwrite?"),
+                message: format!(
+                    "\"{}\" already exists on device. Overwrite?",
+                    truncate_middle(filename, DIALOG_FILENAME_MAX),
+                ),
                 on_confirm: ConfirmAction::OverwritePush {
                     source: entry.path.clone(),
                     delete_id: existing.id.clone(),
@@ -508,7 +514,10 @@ impl App {
         if self.host_cwd.join(&filename).exists() {
             self.dialog = ActiveDialog::Confirm(ConfirmDialog {
                 title: "Overwrite?".into(),
-                message: format!("\"{filename}\" already exists on host. Overwrite?"),
+                message: format!(
+                    "\"{}\" already exists on host. Overwrite?",
+                    truncate_middle(&filename, DIALOG_FILENAME_MAX),
+                ),
                 on_confirm: ConfirmAction::OverwritePull { entry_id, filename },
             });
             return Ok(());
@@ -578,7 +587,10 @@ impl App {
         let cursor_pos = entry.name.len();
         self.dialog = ActiveDialog::TextInput(TextInputDialog {
             title: "Rename".into(),
-            prompt: format!("Rename \"{}\" to:", entry.name),
+            prompt: format!(
+                "Rename \"{}\" to:",
+                truncate_middle(&entry.name, DIALOG_FILENAME_MAX),
+            ),
             input: entry.name.clone(),
             cursor_pos,
             on_submit: TextInputAction::Rename {
@@ -621,7 +633,10 @@ impl App {
         };
         self.dialog = ActiveDialog::Confirm(ConfirmDialog {
             title: "Delete?".into(),
-            message: format!("Delete {kind} \"{}\"?", entry.name),
+            message: format!(
+                "Delete {kind} \"{}\"?",
+                truncate_middle(&entry.name, DIALOG_FILENAME_MAX),
+            ),
             on_confirm: ConfirmAction::Delete {
                 entry_id: entry.id.clone(),
                 name: entry.name.clone(),
